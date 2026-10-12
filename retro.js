@@ -43,6 +43,13 @@ function getCurrentDemoUser() {
   }
 }
 
+function nextDemoId() {
+  const current = Number(window.localStorage.getItem('crafblox_demo_next_id') || '1');
+  const next = Number.isFinite(current) && current > 0 ? current : 1;
+  window.localStorage.setItem('crafblox_demo_next_id', String(next + 1));
+  return next;
+}
+
 function findDemoUser(username) {
   const state = getDemoState();
   return state.users.find((user) => user.username.toLowerCase() === String(username).toLowerCase());
@@ -57,8 +64,11 @@ function demoApi(endpoint, options = {}) {
   const method = (options.method || 'GET').toUpperCase();
   const currentUser = getCurrentDemoUser();
   const path = String(endpoint || '/');
-  const userMatch = path.match(/^\/api\/users\/([0-9]+)(?:\/|$)/);
-  const requestMatch = path.match(/^\/api\/friend-requests\/([0-9]+)(?:\/|$)/);
+  const routePath = path.split('?')[0];
+  const queryString = path.includes('?') ? path.slice(path.indexOf('?') + 1) : '';
+  const userMatch = routePath.match(/^\/api\/users\/([0-9]+)(?:\/|$)/);
+  const messageMatch = routePath.match(/^\/api\/messages\/([0-9]+)(?:\/|$)/);
+  const requestMatch = routePath.match(/^\/api\/friend-requests\/([0-9]+)(?:\/|$)/);
 
   if (path === '/api/me') {
     return Promise.resolve({ user: currentUser ? { id: currentUser.id, username: currentUser.username, createdAt: currentUser.createdAt || Date.now() } : null });
@@ -77,7 +87,7 @@ function demoApi(endpoint, options = {}) {
       if (!/^[A-Za-z0-9_]{3,20}$/.test(username)) throw new Error('Usernames must be 3–20 characters: letters, numbers, or underscores.');
       if (password.length < 10 || password.length > 128) throw new Error('Passwords must be 10–128 characters.');
       if (findDemoUser(username)) throw new Error('That username is already taken.');
-      const user = { id: Date.now(), username, password, createdAt: Date.now() };
+      const user = { id: nextDemoId(), username, password, createdAt: Date.now() };
       state.users.push(user);
       setDemoState(state);
       const safeUser = { id: user.id, username: user.username, createdAt: user.createdAt };
@@ -147,7 +157,7 @@ function demoApi(endpoint, options = {}) {
     if (exists) throw new Error('You are already friends.');
     const pending = state.friendRequests.find((request) => request.requesterId === currentUser.id && request.recipientId === recipientId && request.status === 'pending');
     if (pending) return Promise.resolve({ status: 'pending', requestId: pending.id });
-    const request = { id: Date.now(), requesterId: currentUser.id, recipientId, status: 'pending', createdAt: Date.now() };
+    const request = { id: nextDemoId(), requesterId: currentUser.id, recipientId, status: 'pending', createdAt: Date.now() };
     state.friendRequests.push(request);
     setDemoState(state);
     return Promise.resolve({ status: 'pending', requestId: request.id });
@@ -207,18 +217,22 @@ function demoApi(endpoint, options = {}) {
     return Promise.resolve({ ok: true });
   }
 
-  if (userMatch && path.includes('/messages') && method === 'GET') {
-    const otherId = Number(userMatch[1]);
-    const messages = (state.messages || []).filter((message) => (message.senderId === currentUser.id && message.recipientId === otherId) || (message.senderId === otherId && message.recipientId === currentUser.id)).sort((a, b) => a.id - b.id);
+  if (messageMatch && method === 'GET') {
+    const otherId = Number(messageMatch[1]);
+    const after = Number(new URLSearchParams(queryString).get('after') || 0);
+    const messages = (state.messages || []).filter((message) => {
+      const isParticipant = (message.senderId === currentUser.id && message.recipientId === otherId) || (message.senderId === otherId && message.recipientId === currentUser.id);
+      return isParticipant && message.id > after;
+    }).sort((a, b) => a.id - b.id);
     return Promise.resolve({ messages });
   }
 
-  if (userMatch && path.includes('/messages') && method === 'POST') {
-    const otherId = Number(userMatch[1]);
+  if (messageMatch && method === 'POST') {
+    const otherId = Number(messageMatch[1]);
     const body = options.body ? JSON.parse(options.body) : {};
     const messageText = String(body.message || '').trim();
     if (!messageText) throw new Error('Messages must contain 1–1000 characters.');
-    const message = { id: Date.now(), senderId: currentUser.id, recipientId: otherId, body: messageText, createdAt: Date.now() };
+    const message = { id: nextDemoId(), senderId: currentUser.id, recipientId: otherId, body: messageText, createdAt: Date.now() };
     state.messages.push(message);
     setDemoState(state);
     return Promise.resolve({ id: message.id, senderId: currentUser.id, senderUsername: currentUser.username, recipientId: otherId, body: messageText, createdAt: message.createdAt });

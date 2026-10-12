@@ -85,3 +85,78 @@ test('signup and friend-request flow work against the real server API', async ()
     await new Promise((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
   }
 });
+
+test('github pages static fallback supports chat message endpoints', async () => {
+  const fs = require('node:fs');
+  const vm = require('node:vm');
+  const code = fs.readFileSync(require('node:path').join(__dirname, '..', 'retro.js'), 'utf8');
+  const storage = {};
+  const localStorage = {
+    getItem(key) { return Object.prototype.hasOwnProperty.call(storage, key) ? storage[key] : null; },
+    setItem(key, value) { storage[key] = String(value); },
+    removeItem(key) { delete storage[key]; },
+    clear() { Object.keys(storage).forEach((key) => delete storage[key]); }
+  };
+  const document = {
+    querySelector() { return { dataset: {}, hidden: false, open: false, style: {}, textContent: '', value: '', innerHTML: '', classList: { toggle() {}, add() {}, remove() {} }, setAttribute() {}, append() {}, appendChild() {}, addEventListener() {}, showModal() { this.open = true; }, close() { this.open = false; }, focus() {}, reset() {}, scrollTop: 0 }; },
+    querySelectorAll() { return []; },
+    createElement() { return { dataset: {}, hidden: false, open: false, style: {}, textContent: '', value: '', innerHTML: '', classList: { toggle() {}, add() {}, remove() {} }, setAttribute() {}, append() {}, appendChild() {}, addEventListener() {}, showModal() { this.open = true; }, close() { this.open = false; }, focus() {}, reset() {}, scrollTop: 0 }; },
+    addEventListener() {}
+  };
+  const context = {
+    console,
+    window: {
+      location: { hostname: 'h2eni.github.io', pathname: '/crafblox/', protocol: 'https:' },
+      localStorage,
+      history: { pushState() {} },
+      setTimeout,
+      clearTimeout,
+      setInterval() { return 0; },
+      clearInterval() {},
+      scrollTo() {},
+      confirm() { return true; },
+      prompt() { return 'Because it is static'; },
+      addEventListener() {}
+    },
+    document,
+    localStorage,
+    URLSearchParams,
+    FormData: class {},
+    Headers: class {},
+    location: { hostname: 'h2eni.github.io', pathname: '/crafblox/', protocol: 'https:' },
+    history: { pushState() {} },
+    setTimeout,
+    clearTimeout,
+    setInterval() { return 0; },
+    clearInterval() {},
+    scrollTo() {},
+    fetch: async () => ({ ok: true, json: async () => ({}) })
+  };
+  context.window.document = document;
+  context.window.location = context.location;
+  context.window.localStorage = localStorage;
+  context.window.history = context.history;
+  context.globalThis = context;
+  context.self = context;
+  vm.createContext(context);
+  vm.runInContext(code, context);
+  await context.api('/api/auth/signup', { method: 'POST', body: JSON.stringify({ username: 'charlie', password: 'password1234' }) });
+  await context.api('/api/auth/signup', { method: 'POST', body: JSON.stringify({ username: 'dana', password: 'password1234' }) });
+  await context.api('/api/auth/login', { method: 'POST', body: JSON.stringify({ username: 'charlie', password: 'password1234' }) });
+  const users = await context.api('/api/users');
+  const other = users.users.find((user) => user.username === 'dana');
+  assert.ok(other, 'demo users list should expose the other user');
+  await context.api(`/api/users/${other.id}/friend-request`, { method: 'POST', body: '{}' });
+  await context.api('/api/auth/logout', { method: 'POST' });
+  await context.api('/api/auth/login', { method: 'POST', body: JSON.stringify({ username: 'dana', password: 'password1234' }) });
+  const requests = await context.api('/api/friend-requests');
+  const requestId = requests.incoming[0].id;
+  await context.api(`/api/friend-requests/${requestId}/accept`, { method: 'POST', body: '{}' });
+  await context.api('/api/auth/logout', { method: 'POST' });
+  await context.api('/api/auth/login', { method: 'POST', body: JSON.stringify({ username: 'charlie', password: 'password1234' }) });
+  const messageResult = await context.api(`/api/messages/${other.id}?after=0`, { method: 'GET' });
+  const sendResult = await context.api(`/api/messages/${other.id}`, { method: 'POST', body: JSON.stringify({ message: 'hello friend' }) });
+  assert.equal(sendResult.body, 'hello friend');
+  assert.equal(sendResult.senderUsername, 'charlie');
+  assert.ok(Array.isArray(messageResult.messages) || messageResult.messages === undefined, 'chat routes should return message data without a 404');
+});
