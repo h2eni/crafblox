@@ -19,7 +19,213 @@ const retroGames = [
   { name: 'Pixel Quest', genre: 'Adventure', alt: 'Adventure map' },
   { name: 'Sky Arena', genre: 'Action', alt: 'Action arena' }
 ];
+const isGitHubPages = typeof window !== 'undefined' && (window.location.hostname.endsWith('.github.io') || window.location.protocol === 'file:');
 const apiBase = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? '' : (window.location.hostname.endsWith('.github.io') ? 'http://localhost:3000' : '');
+
+function getDemoState() {
+  try {
+    return JSON.parse(window.localStorage.getItem('crafblox_demo_state') || '{"users":[],"friendRequests":[],"friendships":[],"blocks":[],"messages":[]}');
+  } catch {
+    return { users: [], friendRequests: [], friendships: [], blocks: [], messages: [] };
+  }
+}
+
+function setDemoState(state) {
+  window.localStorage.setItem('crafblox_demo_state', JSON.stringify(state));
+}
+
+function getCurrentDemoUser() {
+  try {
+    const cached = JSON.parse(window.localStorage.getItem('crafblox_user') || 'null');
+    return cached && cached.username ? cached : null;
+  } catch {
+    return null;
+  }
+}
+
+function findDemoUser(username) {
+  const state = getDemoState();
+  return state.users.find((user) => user.username.toLowerCase() === String(username).toLowerCase());
+}
+
+function demoPublicUser(user) {
+  return { id: user.id, username: user.username, online: true, createdAt: user.createdAt };
+}
+
+function demoApi(endpoint, options = {}) {
+  const state = getDemoState();
+  const method = (options.method || 'GET').toUpperCase();
+  const currentUser = getCurrentDemoUser();
+  const path = String(endpoint || '/');
+  const userMatch = path.match(/^\/api\/users\/([0-9]+)(?:\/|$)/);
+  const requestMatch = path.match(/^\/api\/friend-requests\/([0-9]+)(?:\/|$)/);
+
+  if (path === '/api/me') {
+    return Promise.resolve({ user: currentUser ? { id: currentUser.id, username: currentUser.username, createdAt: currentUser.createdAt || Date.now() } : null });
+  }
+
+  if (path === '/api/auth/logout' && method === 'POST') {
+    window.localStorage.removeItem('crafblox_user');
+    return Promise.resolve({ ok: true });
+  }
+
+  if (path === '/api/auth/signup' && method === 'POST') {
+    return Promise.resolve().then(() => {
+      const body = options.body ? JSON.parse(options.body) : {};
+      const username = String(body.username || '').trim();
+      const password = String(body.password || '');
+      if (!/^[A-Za-z0-9_]{3,20}$/.test(username)) throw new Error('Usernames must be 3–20 characters: letters, numbers, or underscores.');
+      if (password.length < 10 || password.length > 128) throw new Error('Passwords must be 10–128 characters.');
+      if (findDemoUser(username)) throw new Error('That username is already taken.');
+      const user = { id: Date.now(), username, password, createdAt: Date.now() };
+      state.users.push(user);
+      setDemoState(state);
+      const safeUser = { id: user.id, username: user.username, createdAt: user.createdAt };
+      window.localStorage.setItem('crafblox_user', JSON.stringify(safeUser));
+      return { user: safeUser };
+    });
+  }
+
+  if (path === '/api/auth/login' && method === 'POST') {
+    return Promise.resolve().then(() => {
+      const body = options.body ? JSON.parse(options.body) : {};
+      const username = String(body.username || '').trim();
+      const password = String(body.password || '');
+      const user = findDemoUser(username);
+      if (!user || user.password !== password) throw new Error('Username or password is incorrect.');
+      const safeUser = { id: user.id, username: user.username, createdAt: user.createdAt };
+      window.localStorage.setItem('crafblox_user', JSON.stringify(safeUser));
+      return { user: safeUser };
+    });
+  }
+
+  if (!currentUser) {
+    return Promise.reject(new Error('Sign in to use your account.'));
+  }
+
+  if (path === '/api/users') {
+    const params = new URLSearchParams(endpoint.split('?')[1] || '');
+    const search = (params.get('search') || '').trim().toLowerCase();
+    const users = state.users.filter((user) => user.id !== currentUser.id && (!search || user.username.toLowerCase().includes(search))).map(demoPublicUser);
+    return Promise.resolve({ users });
+  }
+
+  if (path === '/api/friends') {
+    const currentId = currentUser.id;
+    const friends = state.friendships.filter((pair) => pair.user_a === currentId || pair.user_b === currentId).map((pair) => {
+      const friendId = pair.user_a === currentId ? pair.user_b : pair.user_a;
+      const friend = state.users.find((user) => user.id === friendId);
+      return friend ? demoPublicUser(friend) : null;
+    }).filter(Boolean);
+    return Promise.resolve({ friends });
+  }
+
+  if (path === '/api/friend-requests') {
+    const currentId = currentUser.id;
+    return Promise.resolve({
+      incoming: state.friendRequests.filter((request) => request.recipientId === currentId && request.status === 'pending').map((request) => ({
+        id: request.id,
+        requesterId: request.requesterId,
+        recipientId: currentId,
+        requesterUsername: state.users.find((user) => user.id === request.requesterId)?.username || 'Unknown',
+        recipientUsername: currentUser.username
+      })),
+      outgoing: state.friendRequests.filter((request) => request.requesterId === currentId && request.status === 'pending').map((request) => ({
+        id: request.id,
+        requesterId: currentId,
+        recipientId: request.recipientId,
+        requesterUsername: currentUser.username,
+        recipientUsername: state.users.find((user) => user.id === request.recipientId)?.username || 'Unknown'
+      }))
+    });
+  }
+
+  if (userMatch && method === 'POST' && path.includes('/friend-request')) {
+    const recipientId = Number(userMatch[1]);
+    if (!Number.isFinite(recipientId) || recipientId === currentUser.id) throw new Error('Choose a different user.');
+    const exists = state.friendships.some((pair) => (pair.user_a === currentUser.id && pair.user_b === recipientId) || (pair.user_a === recipientId && pair.user_b === currentUser.id));
+    if (exists) throw new Error('You are already friends.');
+    const pending = state.friendRequests.find((request) => request.requesterId === currentUser.id && request.recipientId === recipientId && request.status === 'pending');
+    if (pending) return Promise.resolve({ status: 'pending', requestId: pending.id });
+    const request = { id: Date.now(), requesterId: currentUser.id, recipientId, status: 'pending', createdAt: Date.now() };
+    state.friendRequests.push(request);
+    setDemoState(state);
+    return Promise.resolve({ status: 'pending', requestId: request.id });
+  }
+
+  if (requestMatch && method === 'POST' && path.includes('/accept')) {
+    const requestId = Number(requestMatch[1]);
+    const request = state.friendRequests.find((item) => item.id === requestId && item.recipientId === currentUser.id && item.status === 'pending');
+    if (!request) throw new Error('Friend request not found.');
+    request.status = 'accepted';
+    const pair = { user_a: Math.min(request.requesterId, currentUser.id), user_b: Math.max(request.requesterId, currentUser.id), createdAt: Date.now() };
+    state.friendships = state.friendships.filter((item) => !(item.user_a === pair.user_a && item.user_b === pair.user_b)).concat(pair);
+    setDemoState(state);
+    return Promise.resolve({ status: 'accepted', friends: state.friendships.filter((item) => item.user_a === currentUser.id || item.user_b === currentUser.id).map((item) => {
+      const friendId = item.user_a === currentUser.id ? item.user_b : item.user_a;
+      return demoPublicUser(state.users.find((user) => user.id === friendId));
+    }) });
+  }
+
+  if (requestMatch && method === 'POST' && path.includes('/decline')) {
+    const requestId = Number(requestMatch[1]);
+    const request = state.friendRequests.find((item) => item.id === requestId && item.recipientId === currentUser.id && item.status === 'pending');
+    if (!request) throw new Error('Friend request not found.');
+    request.status = 'declined';
+    setDemoState(state);
+    return Promise.resolve({ status: 'declined' });
+  }
+
+  if (requestMatch && method === 'DELETE') {
+    const requestId = Number(requestMatch[1]);
+    const index = state.friendRequests.findIndex((item) => item.id === requestId && item.requesterId === currentUser.id && item.status === 'pending');
+    if (index === -1) throw new Error('Sent friend request not found.');
+    state.friendRequests.splice(index, 1);
+    setDemoState(state);
+    return Promise.resolve({ status: 'canceled' });
+  }
+
+  if (userMatch && method === 'DELETE' && path.includes('/friends/')) {
+    const otherId = Number(userMatch[1]);
+    state.friendships = state.friendships.filter((pair) => !((pair.user_a === currentUser.id && pair.user_b === otherId) || (pair.user_a === otherId && pair.user_b === currentUser.id)));
+    state.friendRequests = state.friendRequests.filter((request) => !(request.requesterId === currentUser.id && request.recipientId === otherId || request.requesterId === otherId && request.recipientId === currentUser.id));
+    setDemoState(state);
+    return Promise.resolve({ friends: [] });
+  }
+
+  if (userMatch && method === 'POST' && path.includes('/block')) {
+    const otherId = Number(userMatch[1]);
+    state.blocks = state.blocks.filter((entry) => !(entry.blockerId === currentUser.id && entry.blockedId === otherId));
+    state.blocks.push({ blockerId: currentUser.id, blockedId: otherId, createdAt: Date.now() });
+    state.friendships = state.friendships.filter((pair) => !(pair.user_a === currentUser.id && pair.user_b === otherId) && !(pair.user_a === otherId && pair.user_b === currentUser.id));
+    state.friendRequests = state.friendRequests.filter((request) => !(request.requesterId === currentUser.id && request.recipientId === otherId) && !(request.requesterId === otherId && request.recipientId === currentUser.id));
+    setDemoState(state);
+    return Promise.resolve({ ok: true });
+  }
+
+  if (userMatch && method === 'POST' && path.includes('/report')) {
+    return Promise.resolve({ ok: true });
+  }
+
+  if (userMatch && path.includes('/messages') && method === 'GET') {
+    const otherId = Number(userMatch[1]);
+    const messages = (state.messages || []).filter((message) => (message.senderId === currentUser.id && message.recipientId === otherId) || (message.senderId === otherId && message.recipientId === currentUser.id)).sort((a, b) => a.id - b.id);
+    return Promise.resolve({ messages });
+  }
+
+  if (userMatch && path.includes('/messages') && method === 'POST') {
+    const otherId = Number(userMatch[1]);
+    const body = options.body ? JSON.parse(options.body) : {};
+    const messageText = String(body.message || '').trim();
+    if (!messageText) throw new Error('Messages must contain 1–1000 characters.');
+    const message = { id: Date.now(), senderId: currentUser.id, recipientId: otherId, body: messageText, createdAt: Date.now() };
+    state.messages.push(message);
+    setDemoState(state);
+    return Promise.resolve({ id: message.id, senderId: currentUser.id, senderUsername: currentUser.username, recipientId: otherId, body: messageText, createdAt: message.createdAt });
+  }
+
+  return Promise.reject(new Error('API endpoint not found.'));
+}
 
 function resolveApiUrl(endpoint) {
   if (!endpoint || /^https?:\/\//.test(endpoint)) return endpoint;
@@ -52,6 +258,9 @@ function userMarkup(user, index) {
 }
 
 async function api(endpoint, options = {}) {
+  if (isGitHubPages || window.location.hostname === '127.0.0.1' && !window.location.port) {
+    return demoApi(endpoint, options);
+  }
   const headers = new Headers(options.headers || {});
   if (options.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
   const url = resolveApiUrl(endpoint);
